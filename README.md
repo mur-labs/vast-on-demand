@@ -1,4 +1,4 @@
-# Rental LLM's — Vast.ai Lab
+# vast-on-demand
 
 On-demand `llama.cpp` inference container and zero-dependency Python Orchestrator for running open-weight LLMs on Vast.ai spot/on-demand GPUs with automatic scale-to-zero.
 
@@ -39,7 +39,7 @@ When a request hits `:8088`, the orchestrator rents the cheapest qualifying GPU 
    Check current state anytime via `GET http://127.0.0.1:8088/status`.
 
 4. **Optional: Forking & Building Your Own Image**
-   The CLI defaults to `ghcr.io/mur-labs/rental-llm:latest`, which is built transparently from [`Dockerfile`](Dockerfile) and [`entrypoint.sh`](entrypoint.sh) with no baked-in secrets or model weights (`MODEL_URL`, `API_TOKEN`, and `HF_TOKEN` are injected at runtime). If you fork this repo, [`.github/workflows/docker-build-push.yml`](.github/workflows/docker-build-push.yml) builds and pushes `ghcr.io/<your-user>/rental-llm:latest` automatically on push to `main`—no local Docker required. Pass `--image ghcr.io/<your-user>/rental-llm:latest` or set `RENTAL_DOCKER_IMAGE` in `.env`.
+   The CLI defaults to `ghcr.io/mur-labs/vast-on-demand:latest`, which is built transparently from [`Dockerfile`](Dockerfile) and [`entrypoint.sh`](entrypoint.sh) with no baked-in secrets or model weights (`MODEL_URL`, `API_TOKEN`, and `HF_TOKEN` are injected at runtime). If you fork this repo, [`.github/workflows/docker-build-push.yml`](.github/workflows/docker-build-push.yml) builds and pushes `ghcr.io/<your-user>/vast-on-demand:latest` automatically on push to `main`—no local Docker required. Pass `--image ghcr.io/<your-user>/vast-on-demand:latest` or set `RENTAL_DOCKER_IMAGE` in `.env`.
 
 ---
 

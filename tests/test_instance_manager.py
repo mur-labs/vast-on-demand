@@ -95,12 +95,12 @@ class TestInstanceManager(unittest.TestCase):
         config = OrchestratorConfig(
             poll_interval_seconds=0.01,
             boot_timeout_seconds=1,
-            docker_image="ghcr.io/mur-labs/rental-llm:latest",
+            docker_image="ghcr.io/mur-labs/vast-on-demand:latest",
         )
         self.mock_client.list_instances.return_value = [
             {
                 "id": 554433,
-                "image": "ghcr.io/mur-labs/rental-llm:latest",
+                "image": "ghcr.io/mur-labs/vast-on-demand:latest",
                 "actual_status": "stopped",
                 "status_msg": "stopped",
             }

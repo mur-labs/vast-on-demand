@@ -194,7 +194,7 @@ class InstanceManager:
                 )
 
                 # Match by image name or saved instance ID
-                is_our_image = ("rental-llm" in inst_dump) or (self.config.docker_image.lower() in inst_dump)
+                is_our_image = ("vast-on-demand" in inst_dump) or ("rental-llm" in inst_dump) or (self.config.docker_image.lower() in inst_dump)
                 is_saved = (saved_id is not None and inst_id == saved_id)
 
                 if (is_our_image or is_saved) and "outbid" not in status_msg and status != "outbid":
@@ -245,7 +245,7 @@ class InstanceManager:
             for inst in self.client.list_instances():
                 inst_id = inst.get("id")
                 inst_dump = json.dumps(inst).lower()
-                is_our_image = ("rental-llm" in inst_dump) or (self.config.docker_image.lower() in inst_dump)
+                is_our_image = ("vast-on-demand" in inst_dump) or ("rental-llm" in inst_dump) or (self.config.docker_image.lower() in inst_dump)
                 is_saved = (saved_id is not None and inst_id == saved_id)
                 if not (is_our_image or is_saved):
                     continue
@@ -293,7 +293,7 @@ class InstanceManager:
             bid_price = None
             logger.info("Launching on-demand instance at $%.4f/hr", float(best_offer.get("dph_total") or 0.20))
 
-        if "rental-llm" in self.config.docker_image.lower():
+        if "vast-on-demand" in self.config.docker_image.lower() or "rental-llm" in self.config.docker_image.lower():
             onstart_cmd = None
         else:
             model_name = self.config.active_model.name

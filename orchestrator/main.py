@@ -31,7 +31,7 @@ def main():
     parser.add_argument("--port", type=int, default=8088, help="Local listening port for LiteLLM (default: 8088)")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Local host binding (default: 127.0.0.1)")
     parser.add_argument("--idle-timeout", type=int, default=600, help="Idle timeout in seconds before destruction (default: 600)")
-    parser.add_argument("--image", type=str, default=os.getenv("RENTAL_DOCKER_IMAGE", "ghcr.io/mur-labs/rental-llm:latest"), help="Docker image name")
+    parser.add_argument("--image", type=str, default=os.getenv("RENTAL_DOCKER_IMAGE", "ghcr.io/mur-labs/vast-on-demand:latest"), help="Docker image name")
     parser.add_argument("--model-url", type=str, default=None, help="Direct GGUF model download URL")
     parser.add_argument("--mode", choices=["spot", "on-demand"], default="spot", help="Rental mode: spot (default, cheaper) or on-demand (guaranteed uninterrupted)")
 

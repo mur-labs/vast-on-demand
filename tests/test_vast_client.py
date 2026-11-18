@@ -88,7 +88,7 @@ class TestVastClient(unittest.TestCase):
 
         instance_id = self.client.launch_instance(
             offer_id=36757236,
-            image="ghcr.io/mur-labs/rental-llm:latest",
+            image="ghcr.io/mur-labs/vast-on-demand:latest",
             disk_gb=40,
             env={"MODEL_URL": "http://model", "API_TOKEN": "tok123"},
             container_port=8000
