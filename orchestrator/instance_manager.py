@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import secrets
+import socket
 import subprocess
 import threading
 import time
@@ -49,7 +50,6 @@ class InstanceState(str, enum.Enum):
     STOPPED = "STOPPED"
     PROVISIONING = "PROVISIONING"
     READY = "READY"
-    BUSY = "BUSY"
     DESTROYING = "DESTROYING"
 
 
@@ -97,43 +97,46 @@ class InstanceManager:
         effective_timeout = timeout or self.config.boot_timeout_seconds
         start_time = time.time()
 
-        with self._state_condition:
-            while True:
+        while True:
+            check_target: Optional[Tuple[str, int, str, Optional[int]]] = None
+            with self._state_condition:
                 if self.state == InstanceState.READY and self.endpoint and self.api_token:
-                    host_ip, host_port = self.endpoint
-                    if self._check_health(host_ip, host_port, self.api_token):
-                        self.touch()
-                        return self.endpoint, self.api_token
-                    logger.warning("Existing READY instance %s:%s is no longer healthy/responding. Re-provisioning...", host_ip, host_port)
-                    self.state = InstanceState.STOPPED
-                    self.endpoint = None
-                    self.api_token = None
-                    if self.instance_id:
-                        try:
-                            self.client.destroy_instance(self.instance_id)
-                        except Exception:
-                            pass
-                        self.instance_id = None
-
-                if self.state == InstanceState.STOPPED:
+                    check_target = (self.endpoint[0], self.endpoint[1], self.api_token, self.instance_id)
+                elif self.state == InstanceState.STOPPED:
                     # Claim the provisioning lock
                     self.state = InstanceState.PROVISIONING
                     self._state_condition.notify_all()
                     break
-
-                if self.state == InstanceState.PROVISIONING:
-                    # Another thread is already provisioning; wait for it to finish
+                elif self.state in (InstanceState.PROVISIONING, InstanceState.DESTROYING):
                     elapsed = time.time() - start_time
                     remaining = effective_timeout - elapsed
                     if remaining <= 0:
-                        raise TimeoutError("Timed out waiting for instance provisioning.")
-                    self._state_condition.wait(timeout=min(2.0, remaining))
+                        raise TimeoutError(f"Timed out waiting for instance state {self.state.value}.")
+                    wait_cap = 2.0 if self.state == InstanceState.PROVISIONING else 1.0
+                    self._state_condition.wait(timeout=min(wait_cap, remaining))
                     continue
 
-                if self.state == InstanceState.DESTROYING:
-                    # Wait for destruction to complete before re-provisioning
-                    self._state_condition.wait(timeout=1.0)
-                    continue
+            if check_target is not None:
+                host_ip, host_port, token, inst_id = check_target
+                if self._check_health(host_ip, host_port, token) is True:
+                    self.touch()
+                    return (host_ip, host_port), token
+
+                logger.warning("Existing READY instance %s:%s is no longer healthy/responding. Re-provisioning...", host_ip, host_port)
+                inst_to_destroy: Optional[int] = None
+                with self._state_condition:
+                    if self.state == InstanceState.READY and self.instance_id == inst_id:
+                        inst_to_destroy = self.instance_id
+                        self.state = InstanceState.STOPPED
+                        self.endpoint = None
+                        self.api_token = None
+                        self.instance_id = None
+                        self._state_condition.notify_all()
+                if inst_to_destroy:
+                    try:
+                        self.client.destroy_instance(inst_to_destroy)
+                    except Exception:
+                        pass
 
         # If we broke out of the loop above, this thread is responsible for provisioning
         try:
@@ -190,12 +193,11 @@ class InstanceManager:
                     raw_msg
                 )
 
-                # Match by image name, saved instance ID, or sole instance on account
+                # Match by image name or saved instance ID
                 is_our_image = ("rental-llm" in inst_dump) or (self.config.docker_image.lower() in inst_dump)
                 is_saved = (saved_id is not None and inst_id == saved_id)
-                is_only = (len(instances) == 1)
 
-                if (is_our_image or is_saved or is_only) and "outbid" not in status_msg and status != "outbid":
+                if (is_our_image or is_saved) and "outbid" not in status_msg and status != "outbid":
                     reusable_inst = inst
                     logger.info("Selected instance ID %s for reuse!", inst_id)
                     break
@@ -238,13 +240,19 @@ class InstanceManager:
                 with self._lock:
                     self.instance_id = None
 
-        # 2. Clean up any unknown lingering active instances
+        # 2. Clean up any lingering active instances belonging to this orchestrator
         try:
             for inst in self.client.list_instances():
+                inst_id = inst.get("id")
+                inst_dump = json.dumps(inst).lower()
+                is_our_image = ("rental-llm" in inst_dump) or (self.config.docker_image.lower() in inst_dump)
+                is_saved = (saved_id is not None and inst_id == saved_id)
+                if not (is_our_image or is_saved):
+                    continue
                 raw_st = inst.get("actual_status") or inst.get("cur_state")
                 status = str(raw_st).lower() if isinstance(raw_st, str) else ""
                 if status in ("running", "loading", "created", "scheduling", "pending"):
-                    self.client.destroy_instance(inst.get("id"))
+                    self.client.destroy_instance(inst_id)
         except Exception:
             pass
 
@@ -285,37 +293,43 @@ class InstanceManager:
             bid_price = None
             logger.info("Launching on-demand instance at $%.4f/hr", float(best_offer.get("dph_total") or 0.20))
 
-        onstart_cmd = (
-            "mkdir -p /models\n"
-            "if [ ! -s /models/model.gguf ]; then\n"
-            "    if command -v aria2c >/dev/null 2>&1; then\n"
-            "        aria2c -x 16 -s 16 -k 1M --continue=true --dir=/models --out=model.gguf \"${MODEL_URL}\" || curl -fSL --retry 3 -o /models/model.gguf \"${MODEL_URL}\"\n"
-            "    else\n"
-            "        curl -fSL --retry 3 -o /models/model.gguf \"${MODEL_URL}\"\n"
-            "    fi\n"
-            "fi\n"
-            "cat << 'EOF' > /models/qwen2.5-14b-instruct.yaml\n"
-            "name: qwen2.5-14b-instruct\n"
-            "backend: llama-cpp\n"
-            "parameters:\n"
-            "  model: /models/model.gguf\n"
-            "  context_size: 32768\n"
-            "  gpu_layers: 99\n"
-            "  threads: 8\n"
-            "  f16: true\n"
-            "  mmap: true\n"
-            "EOF\n"
-            "export LOCALAI_API_KEY=\"${API_TOKEN}\"\n"
-            "export ADDRESS=\"0.0.0.0:${PORT:-8080}\"\n"
-            "if command -v local-ai >/dev/null 2>&1; then\n"
-            "    local-ai backends install llama-cpp || true\n"
-            "    nohup local-ai run --models-path /models --address \"0.0.0.0:${PORT:-8080}\" > /var/log/localai.log 2>&1 &\n"
-            "elif [ -x /app/entrypoint.sh ]; then\n"
-            "    nohup /app/entrypoint.sh > /var/log/server.log 2>&1 &\n"
-            "elif command -v llama-server >/dev/null 2>&1; then\n"
-            "    nohup llama-server --model /models/model.gguf --api-key \"${API_TOKEN}\" --host 0.0.0.0 --port \"${PORT:-8080}\" -ngl 99 -c 32768 > /var/log/server.log 2>&1 &\n"
-            "fi\n"
-        )
+        if "rental-llm" in self.config.docker_image.lower():
+            onstart_cmd = None
+        else:
+            model_name = self.config.active_model.name
+            ctx_size = self.config.active_model.context_size
+            gpu_layers = self.config.active_model.gpu_layers
+            hf_header_aria = '--header="Authorization: Bearer ${HF_TOKEN}" ' if self.config.active_model.hf_token else ""
+            hf_header_curl = '-H "Authorization: Bearer ${HF_TOKEN}" ' if self.config.active_model.hf_token else ""
+            onstart_cmd = (
+                "mkdir -p /models\n"
+                "if [ ! -s /models/model.gguf ]; then\n"
+                "    if command -v aria2c >/dev/null 2>&1; then\n"
+                f"        aria2c -x 16 -s 16 -k 1M --continue=true {hf_header_aria}--dir=/models --out=model.gguf \"${{MODEL_URL}}\" || curl -fSL --retry 3 {hf_header_curl}-o /models/model.gguf \"${{MODEL_URL}}\"\n"
+                "    else\n"
+                f"        curl -fSL --retry 3 {hf_header_curl}-o /models/model.gguf \"${{MODEL_URL}}\"\n"
+                "    fi\n"
+                "fi\n"
+                f"cat << 'EOF' > /models/{model_name}.yaml\n"
+                f"name: {model_name}\n"
+                "backend: llama-cpp\n"
+                "parameters:\n"
+                "  model: /models/model.gguf\n"
+                f"  context_size: {ctx_size}\n"
+                f"  gpu_layers: {gpu_layers}\n"
+                "  threads: 8\n"
+                "  f16: true\n"
+                "  mmap: true\n"
+                "EOF\n"
+                "export LOCALAI_API_KEY=\"${API_TOKEN}\"\n"
+                "export ADDRESS=\"0.0.0.0:${PORT:-8080}\"\n"
+                "if command -v local-ai >/dev/null 2>&1; then\n"
+                "    local-ai backends install llama-cpp || true\n"
+                "    nohup local-ai run --models-path /models --address \"0.0.0.0:${PORT:-8080}\" > /var/log/localai.log 2>&1 &\n"
+                "elif command -v llama-server >/dev/null 2>&1; then\n"
+                f"    nohup llama-server --model /models/model.gguf --api-key \"${{API_TOKEN}}\" --host 0.0.0.0 --port \"${{PORT:-8080}}\" -ngl {gpu_layers} -c {ctx_size} > /var/log/server.log 2>&1 &\n"
+                "fi\n"
+            )
 
         instance_id = self.client.launch_instance(
             offer_id=offer_id,
@@ -335,6 +349,12 @@ class InstanceManager:
         _save_persisted_state(instance_id, ephemeral_token)
         return endpoint, ephemeral_token
 
+    @staticmethod
+    def _pick_tunnel_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return int(s.getsockname()[1])
+
     def _await_instance_ready(
         self,
         instance_id: int,
@@ -345,6 +365,7 @@ class InstanceManager:
         start_poll = time.time()
         last_progress_log = time.time()
         stopped_since: Optional[float] = None
+        tunnel_local_port = self._pick_tunnel_port()
         logger.info("Awaiting container boot and dynamic port mapping for instance %s...", instance_id)
 
         while time.time() - start_poll < timeout:
@@ -388,7 +409,15 @@ class InstanceManager:
                     tunnel_script = Path(__file__).resolve().parent.parent / "deploy" / "ssh_tunnel.sh"
                     if tunnel_script.exists():
                         subprocess.run(
-                            [str(tunnel_script), "start", str(ssh_host), str(ssh_port), str(self.config.listen_port), os.path.expanduser("~/.ssh/id_rsa")],
+                            [
+                                str(tunnel_script),
+                                "start",
+                                str(ssh_host),
+                                str(ssh_port),
+                                str(tunnel_local_port),
+                                os.path.expanduser("~/.ssh/id_rsa"),
+                                str(self.config.container_port),
+                            ],
                             check=False,
                             capture_output=True,
                             timeout=10
@@ -396,9 +425,9 @@ class InstanceManager:
                 except Exception as tunnel_err:
                     logger.debug("SSH tunnel auto-start attempted: %s", tunnel_err)
 
-                if self._check_health("127.0.0.1", self.config.listen_port, token) is True:
-                    logger.info("Inference endpoint is live and verified healthy via SSH tunnel on 127.0.0.1:%s!", self.config.listen_port)
-                    return ("127.0.0.1", self.config.listen_port), token
+                if self._check_health("127.0.0.1", tunnel_local_port, token) is True:
+                    logger.info("Inference endpoint is live and verified healthy via SSH tunnel on 127.0.0.1:%s!", tunnel_local_port)
+                    return ("127.0.0.1", tunnel_local_port), token
 
             # 2. Check direct dynamic port mapping
             endpoint = self.client.resolve_dynamic_endpoint(
@@ -517,9 +546,12 @@ class InstanceManager:
             self.last_active_time = 0.0
             self._state_condition.notify_all()
 
-    def mark_failed(self):
+    def mark_failed(self, failed_instance_id: Optional[int] = None):
         """Mark current instance as stopped/failed so subsequent requests re-provision."""
+        inst_to_destroy: Optional[int] = None
         with self._state_condition:
+            if failed_instance_id is not None and self.instance_id != failed_instance_id:
+                return
             if self.state in (InstanceState.READY, InstanceState.PROVISIONING):
                 logger.warning("Marking instance as failed and triggering re-provision.")
                 inst_to_destroy = self.instance_id
@@ -528,12 +560,12 @@ class InstanceManager:
                 self.endpoint = None
                 self.api_token = None
                 self._state_condition.notify_all()
-                if inst_to_destroy:
-                    try:
-                        self.client.destroy_instance(inst_to_destroy)
-                    except Exception:
-                        pass
-                _clear_persisted_state()
+        if inst_to_destroy:
+            try:
+                self.client.destroy_instance(inst_to_destroy)
+            except Exception:
+                pass
+            _clear_persisted_state()
 
     def _reaper_loop(self):
         """Background thread checking for idle inactivity."""

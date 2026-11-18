@@ -31,6 +31,9 @@ class VastClient:
         params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Perform an HTTP request against the Vast.ai REST API."""
+        if not self.api_key:
+            raise VastClientError("VAST_API_KEY is not set.")
+
         if endpoint.startswith("http://") or endpoint.startswith("https://"):
             url = endpoint
         elif endpoint.startswith("/api/"):
@@ -39,10 +42,8 @@ class VastClient:
         else:
             url = f"{self.base_url}/{endpoint.lstrip('/')}"
 
-        query_params = dict(params or {})
-        # Vast.ai supports api_key parameter or Authorization header
-        query_params["api_key"] = self.api_key
-        url = f"{url}?{urllib.parse.urlencode(query_params)}"
+        if params:
+            url = f"{url}?{urllib.parse.urlencode(params)}"
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",

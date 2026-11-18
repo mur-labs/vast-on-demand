@@ -1,4 +1,5 @@
 import http.server
+import json
 import logging
 import socketserver
 import urllib.request
@@ -31,17 +32,34 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         # 2. Read incoming request body immediately to drain client socket
-        content_length = int(self.headers.get("Content-Length", 0))
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length < 0:
+                raise ValueError("Negative Content-Length")
+        except ValueError:
+            err_bytes = json.dumps({"error": {"message": "Invalid Content-Length header", "type": "invalid_request_error"}}).encode("utf-8")
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(err_bytes)))
+            self.end_headers()
+            self.wfile.write(err_bytes)
+            return
         body = self.rfile.read(content_length) if content_length > 0 else None
 
         # 3. Lazy provisioning / readiness check
         try:
             endpoint, api_token = self.manager.ensure_ready()
+            active_instance_id = self.manager.instance_id
         except Exception as e:
             logger.error("Failed to ensure instance readiness: %s", e)
             self.send_response(503)
             self.send_header("Content-Type", "application/json")
-            err_bytes = f'{{"error": {{"message": "Failed to provision GPU instance: {str(e)}", "type": "orchestrator_error"}}}}'.encode("utf-8")
+            err_bytes = json.dumps({
+                "error": {
+                    "message": f"Failed to provision GPU instance: {e}",
+                    "type": "orchestrator_error",
+                }
+            }).encode("utf-8")
             self.send_header("Content-Length", str(len(err_bytes)))
             self.end_headers()
             self.wfile.write(err_bytes)
@@ -85,6 +103,7 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                             break
                         self.wfile.write(chunk)
                         self.wfile.flush()
+                        self.manager.touch()
                 except (BrokenPipeError, ConnectionResetError):
                     logger.debug("Client disconnected while reading response stream")
                 self.manager.touch()
@@ -106,11 +125,16 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             logger.error("Error proxying request to %s: %s", target_url, e)
             if isinstance(e, urllib.error.URLError) or "refused" in str(e).lower() or "reset" in str(e).lower():
-                self.manager.mark_failed()
+                self.manager.mark_failed(active_instance_id)
             try:
                 self.send_response(502)
                 self.send_header("Content-Type", "application/json")
-                err_bytes = f'{{"error": {{"message": "Proxy communication error: {str(e)}", "type": "bad_gateway"}}}}'.encode("utf-8")
+                err_bytes = json.dumps({
+                    "error": {
+                        "message": f"Proxy communication error: {e}",
+                        "type": "bad_gateway",
+                    }
+                }).encode("utf-8")
                 self.send_header("Content-Length", str(len(err_bytes)))
                 self.end_headers()
                 self.wfile.write(err_bytes)

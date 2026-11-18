@@ -137,6 +137,58 @@ class TestProxyServer(unittest.TestCase):
         self.assertTrue(MockLlamaServerHandler.received_auth_header.startswith("Bearer "))
         self.assertEqual(self.manager.get_state(), InstanceState.READY)
 
+    def test_provision_failure_returns_valid_503_json(self):
+        """Verify 503 error response is valid JSON even when exception has quotes/newlines."""
+        self.manager.ensure_ready = MagicMock(
+            side_effect=RuntimeError('Vast API error: {"msg": "no hosts"}\nretry later')
+        )
+        url = f"http://127.0.0.1:{self.proxy_port}/v1/chat/completions"
+        req = urllib.request.Request(url, data=b"{}", method="POST")
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 503)
+        parsed = json.loads(ctx.exception.read().decode("utf-8"))
+        self.assertEqual(parsed["error"]["type"], "orchestrator_error")
+        self.assertIn("no hosts", parsed["error"]["message"])
+
+    def test_invalid_content_length_returns_400(self):
+        """Verify non-numeric Content-Length returns HTTP 400 JSON error."""
+        url = f"http://127.0.0.1:{self.proxy_port}/v1/chat/completions"
+        req = urllib.request.Request(
+            url,
+            data=b"{}",
+            headers={"Content-Length": "not-a-number"},
+            method="POST"
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 400)
+        parsed = json.loads(ctx.exception.read().decode("utf-8"))
+        self.assertEqual(parsed["error"]["type"], "invalid_request_error")
+
+    def test_upstream_connection_refused_returns_502_and_marks_failed(self):
+        """Verify connection failure to remote GPU returns 502 and calls mark_failed."""
+        # Find an unused port where nothing is listening
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            dead_port = s.getsockname()[1]
+
+        self.manager.state = InstanceState.READY
+        self.manager.instance_id = 777
+        self.manager.endpoint = ("127.0.0.1", dead_port)
+        self.manager.api_token = "tok"
+        self.manager._check_health = MagicMock(return_value=True)
+        self.manager.mark_failed = MagicMock()
+
+        url = f"http://127.0.0.1:{self.proxy_port}/v1/chat/completions"
+        req = urllib.request.Request(url, data=b"{}", method="POST")
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 502)
+        parsed = json.loads(ctx.exception.read().decode("utf-8"))
+        self.assertEqual(parsed["error"]["type"], "bad_gateway")
+        self.manager.mark_failed.assert_called_once_with(777)
+
 
 if __name__ == "__main__":
     unittest.main()

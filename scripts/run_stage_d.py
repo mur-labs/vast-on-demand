@@ -79,7 +79,7 @@ def main():
 
         # STEP 2: Independent Endpoint Test
         logger.info("\n[STEP 2] Running Independent Endpoint Validation...")
-        base_url = f"http://127.0.0.1:{config.listen_port}/v1"
+        base_url = f"http://{endpoint[0]}:{endpoint[1]}/v1"
         benchmark = AcademicBenchmark(
             base_url=base_url,
             model=config.active_model.name,

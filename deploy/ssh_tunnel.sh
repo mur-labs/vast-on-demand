@@ -26,6 +26,7 @@ start_tunnel() {
     local port="${2:-}"
     local local_port="${3:-$DEFAULT_LOCAL_PORT}"
     local id_file="${4:-}"
+    local remote_port="${5:-$DEFAULT_REMOTE_PORT}"
 
     if [ -z "$host" ] || [ -z "$port" ]; then
         usage
@@ -43,7 +44,7 @@ start_tunnel() {
     local ssh_opts=(
         -N
         -f
-        -L "${local_port}:localhost:${DEFAULT_REMOTE_PORT}"
+        -L "${local_port}:localhost:${remote_port}"
         -p "${port}"
         -o "ExitOnForwardFailure=yes"
         -o "ServerAliveInterval=30"
@@ -64,29 +65,12 @@ start_tunnel() {
 
     # Find the launched SSH PID
     local pid
-    pid=$(pgrep -f "ssh.*-L ${local_port}:localhost:${DEFAULT_REMOTE_PORT}" | head -n 1 || true)
+    pid=$(pgrep -f "ssh.*-L ${local_port}:localhost:${remote_port}" | head -n 1 || true)
     if [ -n "$pid" ]; then
         echo "$pid" > "$PID_FILE"
         echo "[TUNNEL] Connected successfully (PID: ${pid})."
     else
         echo "[TUNNEL] Started, but PID detection fell back to port check."
-    fi
-
-    # Verify connectivity
-    echo "[TUNNEL] Waiting for remote API readiness on http://127.0.0.1:${local_port}..."
-    local ready=0
-    for _ in {1..10}; do
-        if curl -s -f -m 2 "http://127.0.0.1:${local_port}/v1/models" >/dev/null 2>&1; then
-            ready=1
-            break
-        fi
-        sleep 1
-    done
-
-    if [ "$ready" -eq 1 ]; then
-        echo "[TUNNEL] Connection verified! LiteLLM can now reach http://127.0.0.1:${local_port}/v1"
-    else
-        echo "[TUNNEL] Tunnel active, but remote LocalAI server is still loading or requires authorization token."
     fi
 }
 
@@ -105,7 +89,7 @@ stop_tunnel() {
     fi
 
     # Fallback to pkill
-    pkill -f "ssh.*-L ${DEFAULT_LOCAL_PORT}:localhost" 2>/dev/null && echo "[TUNNEL] Stopped existing tunnels." || echo "[TUNNEL] No active tunnel found."
+    pkill -f "ssh.*-L .*:localhost:" 2>/dev/null && echo "[TUNNEL] Stopped existing tunnels." || echo "[TUNNEL] No active tunnel found."
 }
 
 status_tunnel() {

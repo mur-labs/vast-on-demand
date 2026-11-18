@@ -144,6 +144,12 @@ class TestVastClient(unittest.TestCase):
         success = self.client.destroy_instance(556677)
         self.assertTrue(success)
 
+    def test_missing_api_key_raises_immediately(self):
+        client = VastClient(api_key="")
+        client.api_key = None
+        with self.assertRaises(VastClientError):
+            client.list_instances()
+
 
 if __name__ == "__main__":
     unittest.main()

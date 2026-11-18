@@ -172,6 +172,48 @@ class TestInstanceManager(unittest.TestCase):
         manager.stop_reaper()
         self.assertEqual(manager.get_state(), InstanceState.STOPPED)
 
+    def test_unhealthy_ready_instance_reprovisions(self):
+        """Verify that an unhealthy READY instance is destroyed and re-provisioned."""
+        manager = InstanceManager(self.config, vast_client=self.mock_client)
+        manager.state = InstanceState.READY
+        manager.instance_id = 11111
+        manager.endpoint = ("127.0.0.1", 9999)
+        manager.api_token = "old-token"
+        manager._check_health = MagicMock(side_effect=[False, True])
+
+        endpoint, token = manager.ensure_ready()
+        manager.stop_reaper()
+
+        self.mock_client.destroy_instance.assert_called_with(11111)
+        self.mock_client.launch_instance.assert_called_once()
+        self.assertEqual(endpoint, ("127.0.0.1", 12345))
+        self.assertEqual(manager.get_state(), InstanceState.READY)
+
+    def test_mark_failed_ignores_stale_instance_id(self):
+        """Verify mark_failed with an old instance_id does not tear down a newer instance."""
+        manager = InstanceManager(self.config, vast_client=self.mock_client)
+        manager.state = InstanceState.READY
+        manager.instance_id = 22222
+        manager.endpoint = ("127.0.0.1", 12345)
+        manager.api_token = "new-token"
+
+        manager.mark_failed(failed_instance_id=11111)
+        manager.stop_reaper()
+
+        self.assertEqual(manager.get_state(), InstanceState.READY)
+        self.assertEqual(manager.instance_id, 22222)
+        self.mock_client.destroy_instance.assert_not_called()
+
+    def test_destroying_state_respects_timeout(self):
+        """Verify ensure_ready raises TimeoutError when stuck in DESTROYING."""
+        manager = InstanceManager(self.config, vast_client=self.mock_client)
+        manager.state = InstanceState.DESTROYING
+
+        with self.assertRaises(TimeoutError):
+            manager.ensure_ready(timeout=0.05)
+
+        manager.stop_reaper()
+
 
 if __name__ == "__main__":
     unittest.main()
